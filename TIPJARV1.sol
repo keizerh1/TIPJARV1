@@ -1,35 +1,39 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.0;
 
 /**
- * @title TipJar
- * @dev A contract for collecting tips with messages on the Monad blockchain
+ * @title TipJarV2
+ * @dev Contrat pour envoyer des pourboires à des destinataires spécifiques avec des messages
  */
-contract TipJar {
-    // Tip structure to store tip details
+contract TipJarV2 {
+    address public owner;
+    uint256 public totalTips;
+    uint256 public platformFee; // en pourcentage (e.g., 5 = 5%)
+    
     struct Tip {
         address sender;
+        address recipient;
         uint256 amount;
         string message;
         uint256 timestamp;
     }
-
-    // Array to store all tips
-    Tip[] private tips;
     
-    // Contract owner
-    address public owner;
+    Tip[] public tips;
     
-    // Events
-    event TipReceived(
+    // Mapping pour suivre les soldes des destinataires
+    mapping(address => uint256) public recipientBalances;
+    uint256 public platformBalance;
+    
+    event TipSent(
         address indexed sender,
+        address indexed recipient,
         uint256 amount,
         string message,
         uint256 timestamp
     );
     
     event FundsWithdrawn(
-        address indexed owner,
+        address indexed recipient,
         uint256 amount,
         uint256 timestamp
     );
@@ -39,114 +43,160 @@ contract TipJar {
         address indexed newOwner
     );
     
-    // Modifier for owner-only functions
+    event PlatformFeeUpdated(
+        uint256 oldFee,
+        uint256 newFee
+    );
+    
+    constructor() {
+        owner = msg.sender;
+        platformFee = 5; // 5% par défaut
+    }
+    
     modifier onlyOwner() {
-        require(msg.sender == owner, "Only owner can call this function");
+        require(msg.sender == owner, "TipJar: caller is not the owner");
         _;
     }
     
     /**
-     * @dev Constructor sets the deployer as the initial owner
+     * @dev Envoie un pourboire à un destinataire spécifique
+     * @param _recipient Adresse du destinataire
+     * @param _message Message accompagnant le pourboire
      */
-    constructor() {
-        owner = msg.sender;
-    }
-    
-    /**
-     * @dev Function to send a tip with a message
-     * @param _message The message to include with the tip
-     */
-    function sendTip(string memory _message) external payable {
-        require(msg.value > 0, "Tip amount must be greater than 0");
+    function sendTip(address _recipient, string memory _message) external payable {
+        require(msg.value > 0, "TipJar: tip amount must be greater than 0");
+        require(_recipient != address(0), "TipJar: invalid recipient address");
         
-        // Create and store the new tip
+        // Calcul du montant pour la plateforme et pour le destinataire
+        uint256 platformAmount = (msg.value * platformFee) / 100;
+        uint256 recipientAmount = msg.value - platformAmount;
+        
+        // Mise à jour des soldes
+        platformBalance += platformAmount;
+        recipientBalances[_recipient] += recipientAmount;
+        
+        // Enregistrement du pourboire
         tips.push(Tip({
             sender: msg.sender,
+            recipient: _recipient,
             amount: msg.value,
             message: _message,
             timestamp: block.timestamp
         }));
         
-        // Emit the TipReceived event
-        emit TipReceived(msg.sender, msg.value, _message, block.timestamp);
+        totalTips++;
+        
+        emit TipSent(msg.sender, _recipient, msg.value, _message, block.timestamp);
     }
     
     /**
-     * @dev Function to get the total number of tips
-     * @return The count of tips received
+     * @dev Permet à un destinataire de retirer ses fonds
      */
-    function getTipCount() external view returns (uint256) {
-        return tips.length;
+    function withdrawRecipientFunds() external {
+        uint256 amount = recipientBalances[msg.sender];
+        require(amount > 0, "TipJar: no funds available to withdraw");
+        
+        recipientBalances[msg.sender] = 0;
+        
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        require(success, "TipJar: withdrawal failed");
+        
+        emit FundsWithdrawn(msg.sender, amount, block.timestamp);
     }
     
     /**
-     * @dev Function to get details of a specific tip
-     * @param _index The index of the tip to retrieve
-     * @return Tip details (sender, amount, message, timestamp)
+     * @dev Permet à l'owner de retirer les frais de plateforme
      */
-    function getTip(uint256 _index) external view returns (
-        address,
-        uint256,
-        string memory,
-        uint256
-    ) {
-        require(_index < tips.length, "Tip index out of bounds");
-        Tip memory tip = tips[_index];
-        return (tip.sender, tip.amount, tip.message, tip.timestamp);
+    function withdrawPlatformFees() external onlyOwner {
+        uint256 amount = platformBalance;
+        require(amount > 0, "TipJar: no platform fees available to withdraw");
+        
+        platformBalance = 0;
+        
+        (bool success, ) = payable(owner).call{value: amount}("");
+        require(success, "TipJar: platform fee withdrawal failed");
+        
+        emit FundsWithdrawn(owner, amount, block.timestamp);
     }
     
     /**
-     * @dev Function to get all tips (for frontend display)
-     * @return An array of all tips
+     * @dev Définit un nouveau taux de frais pour la plateforme
+     * @param _newFee Nouveau taux de frais (en pourcentage)
+     */
+    function setPlatformFee(uint256 _newFee) external onlyOwner {
+        require(_newFee <= 20, "TipJar: fee cannot exceed 20%");
+        uint256 oldFee = platformFee;
+        platformFee = _newFee;
+        
+        emit PlatformFeeUpdated(oldFee, _newFee);
+    }
+    
+    /**
+     * @dev Transfère la propriété du contrat à une nouvelle adresse
+     * @param _newOwner Adresse du nouveau propriétaire
+     */
+    function transferOwnership(address _newOwner) external onlyOwner {
+        require(_newOwner != address(0), "TipJar: new owner is the zero address");
+        address oldOwner = owner;
+        owner = _newOwner;
+        
+        emit OwnershipTransferred(oldOwner, _newOwner);
+    }
+    
+    /**
+     * @dev Renvoie tous les pourboires
      */
     function getAllTips() external view returns (Tip[] memory) {
         return tips;
     }
     
     /**
-     * @dev Function to withdraw all collected funds (owner only)
+     * @dev Renvoie un pourboire spécifique par son index
      */
-    function withdrawFunds() external onlyOwner {
-        uint256 balance = address(this).balance;
-        require(balance > 0, "No funds to withdraw");
-        
-        // Transfer the balance to the owner
-        (bool success, ) = owner.call{value: balance}("");
-        require(success, "Withdrawal failed");
-        
-        // Emit the FundsWithdrawn event
-        emit FundsWithdrawn(owner, balance, block.timestamp);
+    function getTip(uint256 _index) external view returns (
+        address sender,
+        address recipient,
+        uint256 amount,
+        string memory message,
+        uint256 timestamp
+    ) {
+        require(_index < tips.length, "TipJar: tip index out of bounds");
+        Tip storage tip = tips[_index];
+        return (
+            tip.sender,
+            tip.recipient,
+            tip.amount,
+            tip.message,
+            tip.timestamp
+        );
     }
     
     /**
-     * @dev Function to transfer ownership (owner only)
-     * @param _newOwner The address of the new owner
+     * @dev Renvoie le nombre de pourboires
      */
-    function transferOwnership(address _newOwner) external onlyOwner {
-        require(_newOwner != address(0), "New owner cannot be the zero address");
-        
-        emit OwnershipTransferred(owner, _newOwner);
-        owner = _newOwner;
+    function getTipCount() external view returns (uint256) {
+        return tips.length;
     }
     
     /**
-     * @dev Function to get the contract's current balance
-     * @return The contract's MON balance
+     * @dev Renvoie le solde d'un destinataire spécifique
+     */
+    function getRecipientBalance(address _recipient) external view returns (uint256) {
+        return recipientBalances[_recipient];
+    }
+    
+    /**
+     * @dev Renvoie le solde total du contrat
      */
     function getContractBalance() external view returns (uint256) {
         return address(this).balance;
     }
     
-    // Fallback function to receive plain MON transfers
+    /**
+     * @dev Fonction de repli pour accepter les paiements sans message
+     */
     receive() external payable {
-        // Store the tip with an empty message
-        tips.push(Tip({
-            sender: msg.sender,
-            amount: msg.value,
-            message: "",
-            timestamp: block.timestamp
-        }));
-        
-        emit TipReceived(msg.sender, msg.value, "", block.timestamp);
+        // Considérer le paiement comme un pourboire à l'owner sans message
+        platformBalance += msg.value;
     }
 }
